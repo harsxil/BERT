@@ -12,7 +12,16 @@ async function request(endpoint, options = {}) {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.detail || `HTTP ${res.status}`);
+    let errMsg = `HTTP ${res.status}`;
+    if (typeof body.detail === 'string') {
+      errMsg = body.detail;
+    } else if (body.detail && typeof body.detail === 'object') {
+      errMsg = body.detail.message || JSON.stringify(body.detail);
+    }
+    const err = new Error(errMsg);
+    err.status = res.status;
+    err.detail = body.detail;
+    throw err;
   }
   return res.json();
 }

@@ -19,11 +19,23 @@ export default function AttentionHeatmapPanel({
 }) {
   const [tooltip, setTooltip] = useState(null);
 
-  if (!data) return null;
+  if (!data || data.valid === false) return null;
 
   const { sentence_a, sentence_b, target_word, num_layers, num_heads } = data;
 
   const renderHeatmap = (sentData, badgeClass, label) => {
+    if (!sentData || sentData.valid === false || !Array.isArray(sentData.target_token_indices) || sentData.target_token_indices.length === 0) {
+      return (
+        <div className="heatmap-box">
+          <div className="heatmap-box__header">
+            <span className={`badge ${badgeClass}`}>{label}</span>
+          </div>
+          <p style={{ padding: '2rem 1rem', textAlign: 'center', color: 'var(--text-muted)' }}>
+            No valid target token found for attention heatmap.
+          </p>
+        </div>
+      );
+    }
     const { tokens, attention_matrix, target_token_indices } = sentData;
 
     return (

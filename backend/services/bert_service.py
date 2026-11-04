@@ -5,7 +5,7 @@ contextual representation and self-attention extraction.
 
 import math
 import logging
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -60,11 +60,44 @@ class BertService:
         layer = max(0, min(11, layer))
         head = max(0, min(11, head))
 
-        # Process Sentence A
-        res_a = self._process_sentence(sentence_a, target_word, layer, head)
+        # Process Sentence A independently
+        res_a = self.process_sentence(sentence_a, target_word, layer, head, sentence_label="Sentence A")
 
-        # Process Sentence B
-        res_b = self._process_sentence(sentence_b, target_word, layer, head)
+        # Process Sentence B independently
+        res_b = self.process_sentence(sentence_b, target_word, layer, head, sentence_label="Sentence B")
+
+        # Validation check across sentences
+        if not res_a.get("valid") or not res_b.get("valid"):
+            if res_a.get("valid"):
+                res_a.pop("_hidden_tensor", None)
+                res_a.pop("_static_tensor", None)
+            if res_b.get("valid"):
+                res_b.pop("_hidden_tensor", None)
+                res_b.pop("_static_tensor", None)
+
+            if not res_a.get("valid") and not res_b.get("valid"):
+                err_msg = f"Target word '{target_word}' was not found in Sentence A or Sentence B."
+            elif not res_a.get("valid"):
+                err_msg = f"Target word '{target_word}' was not found in Sentence A."
+            else:
+                err_msg = f"Target word '{target_word}' was not found in Sentence B."
+
+            return {
+                "valid": False,
+                "error": "TARGET_NOT_FOUND",
+                "message": err_msg,
+                "sentence_a": res_a,
+                "sentence_b": res_b,
+                "target_word": target_word,
+                "cosine_similarity": None,
+                "static_cosine_similarity": None,
+                "layer": layer,
+                "head": head,
+                "num_layers": 12,
+                "num_heads": 12,
+                "hidden_layer": 12,
+                "hidden_dim": 768,
+            }
 
         # Contextual representation cosine similarity (768-dim final hidden states)
         vec_a = res_a["_hidden_tensor"]
@@ -83,6 +116,7 @@ class BertService:
         del res_b["_static_tensor"]
 
         return {
+            "valid": True,
             "sentence_a": res_a,
             "sentence_b": res_b,
             "target_word": target_word,
@@ -96,10 +130,19 @@ class BertService:
             "hidden_dim": 768,
         }
 
-    def _process_sentence(
-        self, sentence: str, target_word: str, layer: int, head: int
+    def process_sentence(
+        self,
+        sentence: str,
+        target_word: str,
+        layer: int = 0,
+        head: int = 0,
+        sentence_label: str = "sentence",
     ) -> Dict[str, Any]:
-        """Run a single sentence through BERT and extract tokens, hidden states, and attention."""
+        """
+        Run a single sentence through BERT and extract tokens, hidden states, and attention.
+        If target_word is not found, returns a TARGET_NOT_FOUND error without running target analysis
+        or using any fallback token.
+        """
         encoded = self.tokenizer(
             sentence,
             return_tensors="pt",
@@ -114,9 +157,33 @@ class BertService:
 
         tokens = self.tokenizer.convert_ids_to_tokens(input_ids[0])
 
-        # Target token mapping using character offsets and subword matching
-        target_indices = self._find_target_indices(target_word, sentence, tokens, offsets)
-        target_idx = target_indices[0] if target_indices else 1
+        # Target token mapping using character offsets and WordPiece boundaries
+        valid, target_indices, char_span, msg = self.find_target_indices(
+            target_word, sentence, tokens, offsets
+        )
+
+        if not valid:
+            logger.info("Target: '%s' | Sentence: '%s...' | Target found: False", target_word, sentence[:30])
+            return {
+                "valid": False,
+                "error": "TARGET_NOT_FOUND",
+                "message": f"Target word '{target_word}' was not found in {sentence_label}." if sentence_label else f"Target word '{target_word}' was not found in the sentence.",
+                "sentence": sentence,
+                "tokens": tokens,
+                "target_word": target_word,
+                "sentence_label": sentence_label,
+            }
+
+        target_idx = target_indices[0]
+        token_span = (tokens[target_indices[0]], tokens[target_indices[-1]])
+        logger.info(
+            "Target: '%s' | Sentence: '%s...' | Target found: True | Character span: %s | BERT token span: %s | Token indices: %s",
+            target_word,
+            sentence[:30],
+            char_span,
+            token_span,
+            target_indices,
+        )
 
         with torch.no_grad():
             outputs = self.model(
@@ -145,11 +212,14 @@ class BertService:
         is_uniform = bool((row_max - row_min) < 1e-6)
 
         return {
+            "valid": True,
             "sentence": sentence,
+            "sentence_label": sentence_label,
             "tokens": tokens,
             "target_token": tokens[target_idx],
             "target_token_index": target_idx,
             "target_token_indices": target_indices,
+            "char_span": char_span,
             "hidden_state_10": [round(float(x), 4) for x in target_vec[:10].tolist()],
             "hidden_state_full": [round(float(x), 4) for x in target_vec.tolist()],
             "hidden_dim": int(target_vec.shape[0]),
@@ -164,37 +234,87 @@ class BertService:
             "_static_tensor": static_vec,
         }
 
-    def _find_target_indices(
+    _process_sentence = process_sentence
+
+    def find_target_indices(
         self,
         word: str,
         sentence: str,
         tokens: List[str],
         offsets: List[List[int]],
-    ) -> List[int]:
-        """Find the token index/indices that correspond to the target word."""
-        clean_target = word.lower().strip(".,!?;:'\"")
+    ) -> Tuple[bool, List[int], Optional[Tuple[int, int]], str]:
+        """
+        Identify the BERT token indices corresponding to the target word.
+        
+        Validates:
+        1. Non-empty normalized target word.
+        2. Case-insensitive matching consistent with bert-base-uncased.
+        3. Word boundary adherence in the sentence (rejects partial matches like 'ani' in 'animal').
+        4. Alignment with BERT WordPiece token offsets without partial-token clipping.
+        5. Absolute rejection when target is absent — NO fallback index.
+        """
+        clean_target = word.strip()
+        # Strip outer quotation marks if provided (e.g., '"it"' or "'it'")
+        if (clean_target.startswith('"') and clean_target.endswith('"')) or \
+           (clean_target.startswith("'") and clean_target.endswith("'")):
+            clean_target = clean_target[1:-1].strip()
 
-        # 1. Exact string match against clean tokens
-        matches = [
-            i for i, tok in enumerate(tokens)
-            if tok.lower().replace("##", "") == clean_target
-        ]
-        if matches:
-            return matches
+        if not clean_target:
+            return False, [], None, "Target word cannot be empty."
 
-        # 2. Overlap test using character offset ranges
-        start_char = sentence.lower().find(clean_target)
-        if start_char != -1:
-            end_char = start_char + len(clean_target)
-            overlap_indices = [
-                i for i, (tok, off) in enumerate(zip(tokens, offsets))
-                if tok not in ("[CLS]", "[SEP]") and off[1] > start_char and off[0] < end_char
-            ]
-            if overlap_indices:
-                return overlap_indices
+        target_lower = clean_target.lower()
+        sent_lower = sentence.lower()
 
-        # 3. Fallback: first non-CLS token
-        return [1] if len(tokens) > 1 else [0]
+        # Find occurrences of target_lower in sent_lower with word boundaries
+        matches = []
+        start_pos = 0
+        while True:
+            idx = sent_lower.find(target_lower, start_pos)
+            if idx == -1:
+                break
+            end_idx = idx + len(target_lower)
+
+            # Character boundary check:
+            # Preceding char must not be alphanumeric (or match starts at beginning of sentence)
+            before_ok = (idx == 0) or not sent_lower[idx - 1].isalnum()
+            # Following char must not be alphanumeric (or match ends at end of sentence)
+            after_ok = (end_idx == len(sent_lower)) or not sent_lower[end_idx].isalnum()
+
+            if before_ok and after_ok:
+                matches.append((idx, end_idx))
+            start_pos = idx + 1
+
+        if not matches:
+            return False, [], None, f"Target word '{word}' was not found in the sentence."
+
+        # Use first valid occurrence
+        target_start, target_end = matches[0]
+
+        # Map to BERT tokens using offsets
+        matched_indices = []
+        for i, (tok_str, off) in enumerate(zip(tokens, offsets)):
+            if tok_str in ("[CLS]", "[SEP]"):
+                continue
+            if off[0] == off[1] == 0:
+                continue
+            # Token overlaps with character span
+            if off[0] < target_end and off[1] > target_start:
+                matched_indices.append(i)
+
+        if not matched_indices:
+            return False, [], None, f"Target word '{word}' could not be mapped to BERT tokens."
+
+        # Token boundary integrity check:
+        first_off = offsets[matched_indices[0]]
+        last_off = offsets[matched_indices[-1]]
+        if first_off[0] > target_start or last_off[1] < target_end:
+            return False, [], None, f"Target word '{word}' does not align with token boundaries."
+
+        # Ensure target does not cut inside an individual token
+        if first_off[0] < target_start or last_off[1] > target_end:
+            return False, [], None, f"Target word '{word}' only partially matches a token."
+
+        return True, matched_indices, (target_start, target_end), "OK"
 
 
 # Module singleton

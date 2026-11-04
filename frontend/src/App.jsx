@@ -8,6 +8,23 @@ const DEFAULT_SENTENCE_A = "The animal didn't cross the road because it was tire
 const DEFAULT_SENTENCE_B = "The animal didn't cross the road because it was raining.";
 const DEFAULT_TARGET = "it";
 
+// Lightweight frontend word-occurrence validation (word boundaries & case-insensitive)
+function hasWordOccurrence(sentence, word) {
+  const cleanWord = word.trim().replace(/^["']|["']$/g, '').toLowerCase();
+  if (!cleanWord) return false;
+  const sentLower = sentence.toLowerCase();
+  let startPos = 0;
+  while (true) {
+    const idx = sentLower.indexOf(cleanWord, startPos);
+    if (idx === -1) return false;
+    const endIdx = idx + cleanWord.length;
+    const beforeOk = idx === 0 || !/[a-z0-9]/i.test(sentLower[idx - 1]);
+    const afterOk = endIdx === sentLower.length || !/[a-z0-9]/i.test(sentLower[endIdx]);
+    if (beforeOk && afterOk) return true;
+    startPos = idx + 1;
+  }
+}
+
 export default function App() {
   const [sentenceA, setSentenceA] = useState(DEFAULT_SENTENCE_A);
   const [sentenceB, setSentenceB] = useState(DEFAULT_SENTENCE_B);
@@ -36,8 +53,29 @@ export default function App() {
 
       if (!sentenceA.trim() || !sentenceB.trim() || !targetWord.trim()) return;
 
-      setLoading(true);
+      // Always clear previous target-specific results immediately on new analysis run
+      setAnalysisData(null);
       setError(null);
+
+      // Lightweight frontend validation
+      const cleanTarget = targetWord.trim().replace(/^["']|["']$/g, '');
+      const inA = hasWordOccurrence(sentenceA, cleanTarget);
+      const inB = hasWordOccurrence(sentenceB, cleanTarget);
+
+      if (!inA || !inB) {
+        let msg;
+        if (!inA && !inB) {
+          msg = `Target word "${cleanTarget}" was not found in Sentence A or Sentence B. Please enter a word that appears in both sentences.`;
+        } else if (!inA) {
+          msg = `Target word "${cleanTarget}" was not found in Sentence A. Please enter a word that appears in both sentences.`;
+        } else {
+          msg = `Target word "${cleanTarget}" was not found in Sentence B. Please enter a word that appears in both sentences.`;
+        }
+        setError(msg);
+        return;
+      }
+
+      setLoading(true);
 
       try {
         const res = await analyzeContext({
@@ -47,9 +85,22 @@ export default function App() {
           layer: l,
           head: h,
         });
-        setAnalysisData(res);
+
+        if (!res.valid && res.valid !== undefined) {
+          setAnalysisData(null);
+          setError(res.message || `Target word "${cleanTarget}" was not found in the sentence.`);
+        } else {
+          setAnalysisData(res);
+          setError(null);
+        }
       } catch (err) {
-        setError(err.message || 'Failed to analyze context with BERT.');
+        // Clear any previous target-specific result when a new invalid target is submitted
+        setAnalysisData(null);
+        if (err.detail && err.detail.type === 'TARGET_NOT_FOUND') {
+          setError(err.detail.message || `Target word "${cleanTarget}" was not found in the sentence.`);
+        } else {
+          setError(err.message || 'Failed to analyze context with BERT.');
+        }
       } finally {
         setLoading(false);
       }
@@ -62,15 +113,19 @@ export default function App() {
     handleAnalyze(0, 0);
   }, []);
 
-  // When layer or head changes and data exists, update
+  // When layer or head changes and active data exists, update
   const handleLayerChange = (newLayer) => {
     setSelectedLayer(newLayer);
-    handleAnalyze(newLayer, selectedHead);
+    if (analysisData) {
+      handleAnalyze(newLayer, selectedHead);
+    }
   };
 
   const handleHeadChange = (newHead) => {
     setSelectedHead(newHead);
-    handleAnalyze(selectedLayer, newHead);
+    if (analysisData) {
+      handleAnalyze(selectedLayer, newHead);
+    }
   };
 
   return (
@@ -110,7 +165,10 @@ export default function App() {
                 className="input-textarea"
                 rows={2}
                 value={sentenceA}
-                onChange={(e) => setSentenceA(e.target.value)}
+                onChange={(e) => {
+                  setSentenceA(e.target.value);
+                  if (error) setError(null);
+                }}
                 placeholder="Enter first sentence…"
               />
             </div>
@@ -125,7 +183,10 @@ export default function App() {
                 className="input-textarea"
                 rows={2}
                 value={sentenceB}
-                onChange={(e) => setSentenceB(e.target.value)}
+                onChange={(e) => {
+                  setSentenceB(e.target.value);
+                  if (error) setError(null);
+                }}
                 placeholder="Enter second sentence…"
               />
             </div>
@@ -138,11 +199,33 @@ export default function App() {
               <input
                 id="target-input"
                 type="text"
-                className="input-text"
+                className={`input-text ${error ? 'input-text--error' : ''}`}
                 value={targetWord}
-                onChange={(e) => setTargetWord(e.target.value)}
+                onChange={(e) => {
+                  setTargetWord(e.target.value);
+                  if (error) setError(null);
+                }}
                 placeholder="e.g. it"
               />
+              {/* User-facing validation message near target input */}
+              {error && (
+                <div
+                  className="target-validation-message"
+                  style={{
+                    color: '#f87171',
+                    fontSize: '0.82rem',
+                    marginTop: '0.45rem',
+                    fontWeight: 500,
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: '0.35rem',
+                    lineHeight: 1.4,
+                  }}
+                >
+                  <span style={{ fontSize: '0.95rem' }}>⚠</span>
+                  <span>{error}</span>
+                </div>
+              )}
             </div>
 
             <button
@@ -162,17 +245,8 @@ export default function App() {
         </div>
       </div>
 
-      {/* Error display */}
-      {error && (
-        <div className="card error-card" style={{ marginBottom: '2rem' }}>
-          <div className="card__body">
-            <strong>⚠ Analysis Error:</strong> {error}
-          </div>
-        </div>
-      )}
-
-      {/* Main Analysis Sections */}
-      {analysisData && (
+      {/* Main Analysis Sections — Only shown when a valid target analysis exists */}
+      {analysisData && analysisData.valid !== false && (
         <main>
           {/* Part A: Contextual Representations & Cosine Similarity */}
           <ContextualVectorPanel data={analysisData} />

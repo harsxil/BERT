@@ -1,11 +1,14 @@
 import React from 'react';
 
 export default function AttentionDistributionPanel({ data, layer, head }) {
-  if (!data) return null;
+  if (!data || data.valid === false) return null;
 
   const { sentence_a, sentence_b, target_word } = data;
 
   const renderDistributionList = (sentData, badgeClass, label) => {
+    if (!sentData || sentData.valid === false || !Array.isArray(sentData.target_token_indices) || sentData.target_token_indices.length === 0 || !Array.isArray(sentData.attention_weights)) {
+      return null;
+    }
     const { tokens, attention_weights, target_token_indices, attention_sum, attention_std, is_uniform } = sentData;
 
     // Find maximum weight to scale bars proportionally

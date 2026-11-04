@@ -4,9 +4,9 @@ export default function ContextualVectorPanel({ data }) {
   const [showFullA, setShowFullA] = useState(false);
   const [showFullB, setShowFullB] = useState(false);
 
-  if (!data) return null;
+  if (!data || data.valid === false || data.cosine_similarity === null || data.cosine_similarity === undefined) return null;
 
-  const { sentence_a, sentence_b, target_word, cosine_similarity, static_cosine_similarity, hidden_dim, hidden_layer } = data;
+  const { sentence_a, sentence_b, target_word, cosine_similarity, hidden_dim, hidden_layer } = data;
 
   return (
     <section className="card fade-in" style={{ marginBottom: '2rem' }}>
@@ -21,7 +21,7 @@ export default function ContextualVectorPanel({ data }) {
         {/* Core Metric Comparison Banner */}
         <div className="similarity-banner">
           <div className="similarity-card similarity-card--contextual">
-            <div className="similarity-card__label">BERT Contextual Cosine Similarity</div>
+            <div className="similarity-card__label">Cosine Similarity</div>
             <div className="similarity-card__value">{cosine_similarity.toFixed(4)}</div>
             <div className="similarity-card__desc">
               Representation of "{target_word}" in Sentence A vs. Sentence B
@@ -33,24 +33,7 @@ export default function ContextualVectorPanel({ data }) {
               />
             </div>
             <p className="similarity-card__note">
-              ✓ Context-dependent: Surrounding words ("tired" vs. "raining") produce distinct internal representations.
-            </p>
-          </div>
-
-          <div className="similarity-card similarity-card--static">
-            <div className="similarity-card__label">Static Word Embedding Baseline</div>
-            <div className="similarity-card__value">{static_cosine_similarity.toFixed(4)}</div>
-            <div className="similarity-card__desc">
-              Traditional Word Embedding (e.g., Word2Vec / BERT Input Table)
-            </div>
-            <div className="similarity-progress">
-              <div
-                className="similarity-progress__bar similarity-progress__bar--static"
-                style={{ width: '100%' }}
-              />
-            </div>
-            <p className="similarity-card__note">
-              ⚠ Context-blind: Static embeddings assign the exact same vector to "{target_word}" regardless of context.
+              ✓ Context-dependent: Surrounding words produce distinct internal representations.
             </p>
           </div>
         </div>

@@ -363,11 +363,8 @@ body {
 /* ── Similarity Banner ────────────────────────────────────────── */
 .similarity-banner {
   display: grid;
-  grid-template-columns: 1.2fr 1fr;
+  grid-template-columns: 1fr;
   gap: 1.25rem;
-}
-@media (max-width: 850px) {
-  .similarity-banner { grid-template-columns: 1fr; }
 }
 
 .similarity-card {

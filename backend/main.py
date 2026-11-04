@@ -78,7 +78,30 @@ def analyze_context(req: AnalyzeContextRequest):
             layer=req.layer if req.layer is not None else 0,
             head=req.head if req.head is not None else 0,
         )
+
+        if not result.get("valid", True):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "type": "TARGET_NOT_FOUND",
+                    "message": result.get("message", f"Target word '{req.target_word}' was not found in the sentence."),
+                    "target_word": req.target_word,
+                    "sentence_a": {
+                        "valid": result["sentence_a"].get("valid", False),
+                        "error": result["sentence_a"].get("error"),
+                        "message": result["sentence_a"].get("message"),
+                    },
+                    "sentence_b": {
+                        "valid": result["sentence_b"].get("valid", False),
+                        "error": result["sentence_b"].get("error"),
+                        "message": result["sentence_b"].get("message"),
+                    },
+                },
+            )
+
         return result
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Context analysis failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"Context analysis error: {exc}")
